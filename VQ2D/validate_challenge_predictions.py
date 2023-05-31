@@ -4,10 +4,11 @@ import tqdm
 
 
 def validate_model_predictions(model_predictions, test_annotations):
+    #print(model_predictions)
     assert type(model_predictions) == type({})
     for key in ["version", "challenge", "results"]:
         assert key in model_predictions.keys()
-    assert model_predictions["version"] == "1.0"
+    assert model_predictions["version"] == "1.0.5"
     assert model_predictions["challenge"] == "ego4d_vq2d_challenge"
     assert type(model_predictions["results"]) == type({})
     assert "videos" in model_predictions["results"]
@@ -26,7 +27,9 @@ def validate_model_predictions(model_predictions, test_annotations):
                         n_samples += 1
 
     pbar = tqdm.tqdm(total=n_samples, desc="Validating user predictions")
+    vidx = 0
     for vannot, vpred in zip(video_annotations, video_predictions):
+        vidx = vidx+1
         assert type(vpred) == type({})
         for key in ["video_uid", "clips"]:
             assert key in vpred
@@ -39,13 +42,20 @@ def validate_model_predictions(model_predictions, test_annotations):
                 assert key in cpreds
         clips_annots = vannot["clips"]
         clips_preds = vpred["clips"]
+        clipidx = 0
         for clip_annots, clip_preds in zip(clips_annots, clips_preds):
+            clipidx = clipidx+1
             assert clip_annots["clip_uid"] == clip_preds["clip_uid"]
             assert type(clip_preds["predictions"]) == type([])
             assert len(clip_preds["predictions"]) == len(clip_annots["annotations"])
+            
+            predid = 0
             for clip_annot, clip_pred in zip(
                 clip_annots["annotations"], clip_preds["predictions"]
             ):
+                predid = predid + 1
+                #del model_predictions["results"]["videos"][vidx-1]["clips"][clipidx-1]["predictions"][predid-1]["annotation_uid"]
+                
                 assert type(clip_pred) == type({})
                 assert "query_sets" in clip_pred
                 valid_query_set_annots = {
@@ -63,16 +73,18 @@ def validate_model_predictions(model_predictions, test_annotations):
                     set(list(valid_query_set_annots.keys()))
                 )
                 for qset_id, qset in clip_pred["query_sets"].items():
+                    #qset = qset[0]
                     assert type(qset) == type({})
                     for key in ["bboxes", "score"]:
                         assert key in qset
                     pbar.update()
 
+    #return model_predictions
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--test-unannotated-path", type=str, required=True)
-    parser.add_argument("--test-predictions-path", type=str, required=True)
+    parser.add_argument("--test_unannotated_path", type=str, required=True)
+    parser.add_argument("--test_predictions", type=str, required=True)
 
     args = parser.parse_args()
 
@@ -80,4 +92,8 @@ if __name__ == "__main__":
         test_annotations = json.load(fp)
     with open(args.test_predictions, "r") as fp:
         model_predictions = json.load(fp)
+    
+    
     validate_model_predictions(model_predictions, test_annotations)
+    with open("YOLO.json", "w") as outfile:
+        json.dump(model_predictions, outfile)

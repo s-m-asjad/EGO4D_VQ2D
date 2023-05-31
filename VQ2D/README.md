@@ -1,131 +1,95 @@
-# Visual Queries 2D localization
+# Methods for Visual Queries 2D Localization
+This repo is a codebase for our submission to the VQ2D task in Ego4D Challenge (CVPR22 and ECCV22). 
+The aim of this repo is to help other researchers and challenge practitioners:
 
-Also see the [VQ2D Quickstart Colab Notebook](https://colab.research.google.com/drive/1vtVOQzLarBCspQjH5RtHZ8qzH0VZxrmZ?usp=sharing) that walks through these instructions.
+- reproduce some of our experiment results and
+- leverage our pre-trained detection model for other tasks.
 
-## Installation instructions
+Currently, this codebase supports the following methods:
 
-1. Clone the repository from [here](https://github.com/EGO4D/episodic-memory).
-    ```
-    git clone git@github.com:EGO4D/episodic-memory.git
-    cd episodic-memory/VQ2D
-    export VQ2D_ROOT=$PWD
-    ```
-2. Create conda environment.
-    ```
-    conda create -n ego4d_vq2d python=3.8
-    ```
+- [Negative Frames Matter in Egocentric Visual Query 2D Localization](https://arxiv.org/abs/2208.01949)
+- [Modeling Object Proposal Sets for Egocentric Visual Query Localization](https://arxiv.org/abs/2211.10528)
 
-3. Install [pytorch](https://pytorch.org/) using conda. We rely on cuda-10.2 and cudnn-7.6.5.32 for our experiments.
-    ```
-    conda install pytorch==1.8.1 torchvision==0.9.1 torchaudio==0.8.1 cudatoolkit=10.2 -c pytorch
-    ```
+## Updates
+- We released our [model ckpt](https://drive.google.com/drive/folders/1Q8lAZocw3k7niWX-gQtThevdgAlCplzA?usp=share_link) and [predicted boxes](https://drive.google.com/drive/folders/1x7crW7VD3nolo-HdsiUdVwfIL6xiPSeJ?usp=share_link). See instructions in [INSTALL.md].(INSTALL.md)
 
-4. Install additional requirements using `pip`.
-    ```
-    pip install -r requirements.txt
-    ```
+- Our code to ECCV22 challenge is released!
 
-5. Install [detectron2](https://github.com/facebookresearch/detectron2).
-    ```
-    python -m pip install detectron2 -f \
-    https://dl.fbaipublicfiles.com/detectron2/wheels/cu111/torch1.8/index.html
-    ```
+- Our checkpoints are released! You can also find them in the Ego4D Model Zoo: https://ego4d-data.org/docs/model-zoo/.
+  - [Config](https://dl.fbaipublicfiles.com/ego4d/model_zoo/vq2d/slurm_8gpus_4nodes_baseline/config.yaml) and [Checkpoint](https://dl.fbaipublicfiles.com/ego4d/model_zoo/vq2d/slurm_8gpus_4nodes_baseline/model.pth), trained with VQ2D v1.0 (used in the first challenge)
+  - [Config](https://dl.fbaipublicfiles.com/ego4d/model_zoo/vq2d/slurm_8gpus_4nodes_baseline_v1.0.5/config.yaml) and [Checkpoint](https://dl.fbaipublicfiles.com/ego4d/model_zoo/vq2d/slurm_8gpus_4nodes_baseline_v1.0.5/model.pth), trained with VQ2D v1.05 (recommended)
 
-6.  Install pytracking according to [these instructions](https://github.com/visionml/pytracking/blob/master/INSTALL.md). Download the pre-trained [KYS tracker weights](https://drive.google.com/drive/folders/1WGNcats9lpQpGjAmq0s0UwO6n22fxvKi) to `$VQ2D_ROOT/pretrained_models/kys.pth`.
-    ```
-    cd $VQ2D_ROOT/dependencies
-    git clone git@github.com:visionml/pytracking.git
-    git checkout de9cb9bb4f8cad98604fe4b51383a1e66f1c45c0
-    ```
+## Introduction
+We deals with the problem of localizing objects
+in image and video datasets from visual exemplars. In particular, we focus on the challenging problem of egocentric visual query localization. We first identify grave implicit biases in current query-conditioned model design and
+visual query datasets. Then, we directly tackle such biases at both frame and object set levels. Concretely, our
+method solves these issues by expanding limited annotations and dynamically dropping object proposals during
+training. Additionally, we propose a novel transformer-based module that allows for object-proposal set context to
+be considered while incorporating query information. We name our module Conditioned Contextual Transformer or
+CocoFormer. Our experiments show the proposed adaptations improve egocentric query detection, leading to a better
+visual query localization system in both 2D and 3D configurations. Thus, we can improve frame-level detection performance from 26.28% to 31.26% in AP, which correspondingly improves the VQ2D and VQ3D localization scores
+by significant margins. Our improved context-aware query object detector ranked first and second respectively in the
+VQ2D and VQ3D tasks in the 2nd Ego4D challenge. 
 
-    Note: For installing the [spatial-correlation-sampler](https://github.com/ClementPinard/Pytorch-Correlation-extension) dependency for pytracking, follow these steps if the pip install fails.
-    ```
-    cd $VQ2D_ROOT/dependencies
-    git clone git@github.com:ClementPinard/Pytorch-Correlation-extension.git
-    cd Pytorch-Correlation-extension
-    python setup.py install
-    ```
+## Visulization
 
-## Running experiments
+[easy] frying pan             |  [hard] blue bin
+:-------------------------:|:-------------------------:
+<img src="demo/ours_easy_frying_pan.gif" width="236" height="180"/> | <img src="demo/ours_hard_blue_bin.gif" height="180"/>
+<!-- ![](visualizations/fryingpan.gif)  |  ![](visualizations/bluebin.gif) -->
 
-1. Download the annotations and videos as instructed [here](https://github.com/facebookresearch/Ego4d/blob/main/ego4d/cli/README.md) to `$VQ2D_ROOT/data`.
-    ```
-    ego4d --output_directory="$VQ2D_ROOT/data" --datasets full_scale annotations
-    # Define ego4d videos directory
-    export EGO4D_VIDEOS_DIR=$VQ2D_ROOT/data/v1/full_scale
-    # Move out vq annotations to $VQ2D_ROOT/data
-    mv $VQ2D_ROOT/data/v1/annotations/vq_*.json $VQ2D_ROOT/data
-    ```
-2. **[New]** We have released an updated version (v1.0.5) of the VQ2D annotations which includes fixes to a subset of data (check details [here](https://eval.ai/web/challenges/challenge-page/1843/overview)). These primarily affect the train and val splits (and not test split). In local experiments, we find that this leads to improved baseline performance on the val split. To use this updated data:
-    ```
-    # Download the data using the Ego4D CLI. 
-    ego4d --output_directory="$VQ2D_ROOT/data" --datasets annotations -y --version v1_0_5
+<!-- ### [easy] frying pan
+<video src="visualizations/ours_easy_frying_pan.mp4" width=360></video>
+<img src="/images/output/video1.gif" width="250" height="250"/>
+### [hard] blue bin
 
-    # Move out vq annotations to $VQ2D_ROOT/data
-    mv $VQ2D_ROOT/data/v1_0_5/annotations/vq_*.json $VQ2D_ROOT/data
-    ```
+<video src="visualizations/ours_hard_blue_bin.mp4" width=360></video> -->
 
-3. Process the VQ dataset.
-    ```
-    python process_vq_dataset.py --annot-root data --save-root data
-    ```
 
-4. Extract clips for validation and test data from videos.
-    ```
-    python convert_videos_to_clips.py \
-        --annot-paths data/vq_val.json data/vq_test_unannotated.json \
-        --save-root data/clips \
-        --ego4d-videos-root $EGO4D_VIDEOS_DIR \
-        --num-workers 10 # Increase this for speed
-    ```
+## Installation
 
-5. Extract images for train and validation data from videos.
-    ```
-    python convert_videos_to_images.py \
-        --annot-paths data/vq_train.json data/vq_val.json \
-        --save-root data/images \
-        --ego4d-videos-root $EGO4D_VIDEOS_DIR \
-        --num-workers 10 # Increase this for speed
-    ```
+Please find installation instructions in [INSTALL.md](INSTALL.md). It includes system requirement, installation guide, and dataset preperation.
 
-6. Training a model. Copy `scripts/train_2_gpus.sh` or `scripts/train_8_gpus.sh` to the required experiment directory and execute it.
-    ```
-    EXPT_ROOT=<experiment path>
-    cp $VQ2D_ROOT/scripts/train_2_gpu.sh $EXPT_ROOT
-    cd $EXPT_ROOT
-    chmod +x train_2_gpu.sh && ./train_2_gpu.sh
-    ```
+## Quick Start
+Run `evaluate_vq2d_one_query.py` with our release checkpoint to quickly see the result.
 
-7. Evaluating the baseline for visual queries 2D localization. Copy `scripts/evaluate_vq.sh` to the exxperiment directory, update the paths and checkpoint id, and execute it. Note: To evaluate with the particle filter tracker, add the commandline argument `tracker.type="pfilter"`.
-    ```
-    EXPT_ROOT=<experiment path>
-    cp $VQ2D_ROOT/scripts/evaluate_vq.sh $EXPT_ROOT
-    cd $EXPT_ROOT
-    <UPDATE PATHS in evaluate_vq.sh>
-    chmod +x evaluate_vq.sh && ./evaluate_vq.sh
-    ```
-    We provide pre-trained models for reproducibility. They can be downloaded using the ego4d CLI as follows:
-    ```
-    python -m ego4d.cli.cli -y --output_directory /path/to/output/ --datasets vq2d_models
-    ```
+```
+    python evaluate_vq2d_one_query.py \
+        model.config_path=$PWD/checkpoint/train_log/slurm_8gpus_4nodes_cocoformer/output/config.yaml \
+        model.checkpoint_path=$PWD/checkpoint/train_log/slurm_8gpus_4nodes_cocoformer/output/model_0064999.pth \
+        data.split=val logging.visualize=True logging.save_dir=$PWD/visualizations
+```
 
-## [New] Making predictions for Ego4D challenge
-1. Ensure that `vq_test_unannotated.json` is copied to `$VQ2D_ROOT`.
-2. Copy `scripts/get_challenge_predictions.sh` to the experiment directory, update the paths and checkpoint id, and execute it. The arguments are similar to baseline evaluation in the previous section, but the script has been modified to output predictions consistent with the challenge format.
-    ```
-    EXPT_ROOT=<experiment path>
-    cp $VQ2D_ROOT/scripts/get_challenge_predictions.sh $EXPT_ROOT
-    cd $EXPT_ROOT
-    <UPDATE PATHS in get_challenge_predictions.sh>
-    chmod +x get_challenge_predictions.sh && ./get_challenge_predictions.sh
-    ```
-3. Note: For faster evaluation, increase `data.num_processes`.
-4. The file `$EXPT_ROOT/visual_queries_log/test_challenge_predictions.json` should be submitted on the EvalAI server.
-5. Before submission you can validate the format of the predictions using the following:
-    ```
-    cd $VQ2D_ROOT
-    python validate_challenge_predictions.py --test-unannotated-path <PATH TO vq_test_unannotated.json> --test-predictions-path <PATH to test_challenge_predictions.json>
-    ```
+## Bibtex
+
+Our CVPR22 Challenge report is available on [arXiv](https://arxiv.org/abs/2208.01949).
+```
+@article{xu2022negative,
+  title={Negative Frames Matter in Egocentric Visual Query 2D Localization},
+  author={Xu, Mengmeng and Fu, Cheng-Yang and Li, Yanghao and Ghanem, Bernard and Perez-Rua, Juan-Manuel and Xiang, Tao},
+  journal={arXiv preprint arXiv:2208.01949},
+  year={2022}
+}
+```
+
+
+Our ECCV22 Challenge report is available on [arXiv](https://arxiv.org/abs/2211.10528).
+
+```
+@article{xu2022where,
+  doi = {10.48550/ARXIV.2211.10528},
+  url = {https://arxiv.org/abs/2211.10528},
+  author = {Xu, Mengmeng and Li, Yanghao and Fu, Cheng-Yang and Ghanem, Bernard and Xiang, Tao and Perez-Rua, Juan-Manuel},
+  title = {Where is my Wallet? Modeling Object Proposal Sets for Egocentric Visual Query Localization},  
+  journal={arXiv preprint arXiv:2211.10528},
+  year={2022}
+}
+
+```
+
+## License
+
+Improved Baseline for Visual Queries 2D Localization is released under the [MIT license](LICENSE).
 
 ## Acknowledgements
-This codebase relies on [detectron2](https://github.com/facebookresearch/detectron2), [PyTracking](https://github.com/visionml/pytracking), [pfilter](https://github.com/johnhw/pfilter) and [ActivityNet](https://github.com/activitynet/ActivityNet) repositories.
+This codebase relies on [detectron2](https://github.com/facebookresearch/detectron2), [Ego4d](https://github.com/EGO4D), and [episodic-memory](https://github.com/EGO4D/episodic-memory) repositories.

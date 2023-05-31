@@ -24,7 +24,7 @@ from vq2d.baselines import (
     SiamPredictor,
 )
 from vq2d.metrics import compute_visual_query_metrics
-from vq2d.structures import ResponseTrack
+from vq2d.structures import ResponseTrack, BBox
 from vq2d.tracking import Tracker
 
 setup_logger()
@@ -78,13 +78,15 @@ def evaluate_vq(annotations, cfg, device_id, use_tqdm=False):
 
     # Visualization
     os.makedirs(cfg.logging.save_dir, exist_ok=True)
+    cfg.logging.visualize = True # I have hard coded it to be true
+    
     if cfg.logging.visualize:
         OmegaConf.save(cfg, os.path.join(cfg.logging.save_dir, "config.yaml"))
 
     annotations_iter = tqdm.tqdm(annotations) if use_tqdm else annotations
     for idx, annotation in enumerate(annotations_iter):
-        if(idx>0):
-            break
+        if(idx!=0):
+            continue
         start_time = time.time()
         clip_uid = annotation["clip_uid"]
         if clip_uid in SKIP_UIDS:
@@ -124,19 +126,26 @@ def evaluate_vq(annotations, cfg, device_id, use_tqdm=False):
         if kernel_size % 2 == 0:
             kernel_size += 1
         score_signal_sm = medfilt(score_signal, kernel_size=kernel_size)
+        # normalize curve
+        score_signal_sm = (score_signal_sm-min(score_signal_sm))/(max(score_signal_sm)-min(score_signal_sm))
+    
         # Identify the latest peak in the signal
         peaks, _ = find_peaks(
-            score_signal_sm,
+            score_signal_sm, height = 0.6,
             distance=sig_cfg.distance,
             width=sig_cfg.width,
             prominence=sig_cfg.prominence,
         )
         peak_signal_time_taken = time.time() - start_time
+        #peaks = np.where(score_signal_sm>0.6)[0]
+        # with open('/media/goku/4b66c306-b38b-4701-9bd5-fd5c65a905fd/asjad.s/EGO4D/test.npy', 'wb') as f:
+        #     np.save(f, np.array(score_signal_sm))
         start_time = time.time()
         # Perform tracking to predict response track
         search_frames = clip_frames[: query_frame - 1]
         if len(peaks) > 0:
             init_state = ret_bboxes[peaks[-1]][0]
+            print(init_state)
             init_frame = clip_frames[init_state.fno]
             pred_rt, pred_rt_vis = tracker(
                 init_state, init_frame, search_frames, similarity_net, device
@@ -186,6 +195,7 @@ def evaluate_vq(annotations, cfg, device_id, use_tqdm=False):
 
         # Note: This visualization does not work for subsampled evaluation.
         
+        
         if True:
             print(cfg.logging.save_dir)
             ####################### Visualize the peaks ########################
@@ -197,14 +207,14 @@ def evaluate_vq(annotations, cfg, device_id, use_tqdm=False):
             pred_rt_start, pred_rt_end = pred_response_track[-1][0].temporal_extent
             rt_signal = np.zeros((query_frame,))
             rt_signal[pred_rt_start : pred_rt_end + 1] = 1
-            plt.plot(rt_signal, color="red", label="Pred response track")
+            # plt.plot(rt_signal, color="red", label="Pred response track")
             # Plot peak in signal
             plt.plot(peaks, score_signal_sm[peaks], "rx", label="Peaks")
             # Plot gt response track
             gt_rt_start, gt_rt_end = gt_response_track[-1].temporal_extent
             rt_signal = np.zeros((query_frame,))
             rt_signal[gt_rt_start : gt_rt_end + 1] = 1
-            plt.plot(rt_signal, color="green", label="GT Response track")
+            # plt.plot(rt_signal, color="green", label="GT Response track")
             plt.legend()
             save_path = os.path.join(
                 cfg.logging.save_dir, f"example_{idx:05d}_graph.png"
@@ -216,7 +226,9 @@ def evaluate_vq(annotations, cfg, device_id, use_tqdm=False):
             save_path = os.path.join(
                 cfg.logging.save_dir, f"example_{idx:05d}_visual_crop.png"
             )
+            
             skimage.io.imsave(save_path, visual_crop_im)
+            
             # Visualize retrievals at the peaks
             for peak_idx in peaks:
                 peak_images = get_images_at_peak(
@@ -227,16 +239,19 @@ def evaluate_vq(annotations, cfg, device_id, use_tqdm=False):
                         cfg.logging.save_dir,
                         f"example_{idx:05d}_peak_{peak_idx:05d}_rank_{image_idx:03d}.png",
                     )
-                    skimage.io.imsave(save_path, image)
+                    try:
+                    	skimage.io.imsave(save_path, image)
+                    except:
+                    	pass
             ################## Visualize response track ########################
             print("SAVING VIDEO")
-            """save_path = os.path.join(cfg.logging.save_dir, f"example_{idx:05d}_rt.mp4")
+            save_path = os.path.join(cfg.logging.save_dir, f"example_{idx:05d}_rt.mp4")
             writer = imageio.get_writer(save_path)
             #print(pred_rt_vis)
             for rtf in pred_rt_vis:
                 writer.append_data(rtf)
             writer.close()
-            print("VIDEO SAVED")"""
+            print("VIDEO SAVED")
             ################## Visualize search window #########################
             save_path = os.path.join(cfg.logging.save_dir, f"example_{idx:05d}_sw.mp4")
             writer = imageio.get_writer(save_path)
@@ -289,10 +304,29 @@ def evaluate_vq_parallel(annotations, cfg):
         dataset_uids += output[3]
         acc_frames += output[4]
         tot_frames += output[5]
+    
+    # results = json.load(open("/media/goku/4b66c306-b38b-4701-9bd5-fd5c65a905fd/asjad.s/EGO4D/experiments/test5/visual_queries_logs/res.json"))["predictions"]
+    
+    # rt = []
+    # for i in range(len(results["predicted_response_track"][0])):
+    #     BBs = []
+    #     boxes = results["predicted_response_track"][0][i][0]["bboxes"]
+    #     for box in boxes:
+    #         BBs.append(BBox(box["fno"], box["x1"], box["y1"], box["x2"], box["y2"]))
 
+    #     rt.append([ResponseTrack(BBs, score=1.0)])
+
+    
+    # print(type(pred_rt[0][]))
+    
     metrics = compute_visual_query_metrics(
         pred_rt, gt_rt, vc_boxes, acc_frames, tot_frames
     )
+
+    # print(gt_rt)
+
+    # metrics = compute_visual_query_metrics( rt,gt_rt,vc_boxes,results["accessed_frames"],results["total_frames"]  ) 
+
     predictions = {
         "predicted_response_track": pred_rt,
         "ground_truth_response_track": gt_rt,
@@ -317,6 +351,8 @@ def main(cfg: DictConfig) -> None:
 
     metrics, predictions = evaluate_vq_parallel(annotations, cfg)
     print("==========> Retrieval performance")
+
+    # print(metrics)
     for k, v in metrics.items():
         print(f"{k:<40s} | {v:8.5f}")
     # Store predictions and statistics
@@ -342,3 +378,4 @@ def main(cfg: DictConfig) -> None:
 
 if __name__ == "__main__":
     main()
+

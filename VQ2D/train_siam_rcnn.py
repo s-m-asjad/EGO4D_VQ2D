@@ -70,6 +70,7 @@ def set_model_to_train(model):
     """
     Freezes backbone, proposal_generator. Sets roi_heads to train.
     """
+    '''
     # Freeze backbone
     model.backbone.eval()
     for p in model.backbone.parameters():
@@ -78,6 +79,9 @@ def set_model_to_train(model):
     model.proposal_generator.eval()
     for p in model.proposal_generator.parameters():
         p.requires_grad = False
+    '''
+    model.backbone.train()
+    model.proposal_generator.train()
     # Set roi_heads to train
     model.roi_heads.train()
 
@@ -88,7 +92,29 @@ def do_train(cfg, model, resume=False):
         set_model_to_train(model.module)
     else:
         set_model_to_train(model)
-    optimizer = build_optimizer(cfg, model)
+    # optimizer = build_optimizer(cfg, model)
+    params_backbone = {
+        'params': model.module.backbone.parameters(),
+        "lr": cfg.SOLVER.BASE_LR*0.1
+    }
+    params_proposal_generator = {
+        'params': model.module.proposal_generator.parameters(),
+        "lr": cfg.SOLVER.BASE_LR*0.1
+    }
+    params_roi_heads = {
+        'params': model.module.roi_heads.parameters(),
+        "lr": cfg.SOLVER.BASE_LR
+    }
+    params_list = [params_backbone, params_roi_heads, params_proposal_generator]
+
+    optimizer = torch.optim.SGD(
+            params_list,
+            lr=cfg.SOLVER.BASE_LR,
+            momentum=cfg.SOLVER.MOMENTUM,
+            nesterov=cfg.SOLVER.NESTEROV,
+            weight_decay=cfg.SOLVER.WEIGHT_DECAY,
+        )
+
     scheduler = build_lr_scheduler(cfg, optimizer)
 
     checkpointer = DetectionCheckpointer(
@@ -221,6 +247,15 @@ def register_all_datasets(cfg):
         bbox_aspect_scale=0.5,
         bbox_area_scale=0.25,
         perform_response_augmentation=True,
+    )
+    register_visual_query_datasets(
+        splits_root,
+        images_root,
+        "visual_query_clean_aug_neg",
+        bbox_aspect_scale=0.5,
+        bbox_area_scale=0.25,
+        perform_response_augmentation=True,
+        include_empty_image=True
     )
 
 

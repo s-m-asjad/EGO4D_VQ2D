@@ -41,6 +41,7 @@ def get_images_at_peak(all_bboxes, all_scores, all_imgs, peak_idx, topk=5):
         bbox_images.append(image[bbox.y1 : bbox.y2 + 1, bbox.x1 : bbox.x2 + 1])
     return bbox_images
 
+total_frames = 0
 
 def predict_vq_test(annotations, cfg, device_id, use_tqdm=False):
 
@@ -92,6 +93,10 @@ def predict_vq_test(annotations, cfg, device_id, use_tqdm=False):
         clip_frames = video_reader[0 : max(query_frame, vcfno) + 1]
         clip_read_time = time.time() - start_time
         start_time = time.time()
+        if True:
+            global total_frames
+            total_frames = total_frames + len(clip_frames)
+            continue
         # Retrieve nearest matches and their scores per image
         ret_bboxes, ret_scores, ret_imgs, visual_crop_im = perform_retrieval(
             clip_frames,
@@ -120,7 +125,7 @@ def predict_vq_test(annotations, cfg, device_id, use_tqdm=False):
     
         # Identify the latest peak in the signal
         peaks, _ = find_peaks(
-            score_signal_sm, height = 0.65,
+            score_signal_sm, height = 0.7,
             distance=sig_cfg.distance,
             width=sig_cfg.width,
             prominence=sig_cfg.prominence,
@@ -215,6 +220,31 @@ def predict_vq_test(annotations, cfg, device_id, use_tqdm=False):
 def _mp_aux_fn(inputs):
     return predict_vq_test(*inputs)
 
+
+def predict_vq_test_parallel(annotations, cfg):
+    if cfg.data.debug_mode:
+        cfg.data.num_processes = 1
+
+    context = mp.get_context("forkserver")
+    pool = context.Pool(cfg.data.num_processes, maxtasksperchild=2)
+    # Split data across processes
+    B = cfg.data.batch_size
+    mp_annotations = [annotations[i : (i + B)] for i in range(0, len(annotations), B)]
+    N = len(mp_annotations)
+    devices = [i for i in range(torch.cuda.device_count())]
+    mp_cfgs = [cfg for _ in range(N)]
+    mp_devices = [devices[i % len(devices)] for i in range(N)]
+    mp_inputs = zip(mp_annotations, mp_cfgs, mp_devices)
+    # Perform task
+    list_of_outputs = list(tqdm.tqdm(pool.imap(_mp_aux_fn, mp_inputs), total=N))
+    print("Inference Completed")
+    time.sleep(500)
+    predicted_rts = []
+    for output in list_of_outputs:
+        predicted_rts += output
+    return predicted_rts
+
+
 def convert_annotations_to_list(annotations):
     annotations_list = []
     for v in annotations["videos"]:
@@ -297,26 +327,33 @@ def format_predictions(annotations, annotations_list, predicted_rts):
 @hydra.main(config_path="vq2d", config_name="config")
 def main(cfg: DictConfig) -> None:
     # Load annotations
-    for index in range(3000,4461):
+    if True:
+    # for index in range(0,40):
         annot_path = osp.join(cfg.data.annot_root, f"vq_test_unannotated.json")
         with open(annot_path) as fp:
             annotations = json.load(fp)
         annotations_list = convert_annotations_to_list(annotations)
-        if cfg.data.debug_mode:
-            # print(cfg.data.debug_count_index)
-            # print(cfg.data.debug_count_index+cfg.data.debug_count)
-            # annotations_list = annotations_list[ cfg.data.debug_count_index  : cfg.data.debug_count_index+cfg.data.debug_count]
-            annotations_list = annotations_list[ index  : index+1]
-        elif cfg.data.subsample:
-            annotations_list = annotations_list[::3]
+
+        annotations_list = annotations_list[0:800]+annotations_list[1252:]
+
+    #     if cfg.data.debug_mode:
+    #         # print(cfg.data.debug_count_index)
+    #         # print(cfg.data.debug_count_index+cfg.data.debug_count)
+    #         # annotations_list = annotations_list[ cfg.data.debug_count_index  : cfg.data.debug_count_index+cfg.data.debug_count]
+    #         annotations_list = annotations_list[ index  : index+1]
+    #     elif cfg.data.subsample:
+        # annotations_list = annotations_list[::3]
+        # annotations_list = annotations_list[ 1: 2]
         predicted_rts =  predict_vq_test(annotations_list, cfg,0)#predict_vq_test_parallel(annotations_list, cfg)
         # Convert prediction to challenge format
-        predictions = format_predictions(annotations, annotations_list, predicted_rts)
         # predictions = format_predictions(annotations, annotations_list, predicted_rts)
-        with open("/media/goku/4b66c306-b38b-4701-9bd5-fd5c65a905fd/asjad.s/EGO4D/vq2d_cvpr/results/outputs_"+str(index)+".json.gz", "w") as fp:
-            json.dump(predictions, fp)
+        # predictions = format_predictions(annotations, annotations_list, predicted_rts)
+        # with open("/media/goku/4b66c306-b38b-4701-9bd5-fd5c65a905fd/asjad.s/EGO4D/vq2d_cvpr/results/outputs_"+str(index)+".json.gz", "w") as fp:
+        #     json.dump(predictions, fp)
         
-        print("Completed Video "+ str(index))
+        # print("Completed Video "+ str(index))
+    global total_frames
+    print(total_frames)
 
 if __name__ == "__main__":
     main()

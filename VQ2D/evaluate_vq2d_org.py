@@ -17,10 +17,12 @@ from detectron2_extensions.config import get_cfg as get_detectron_cfg
 from scipy.signal import find_peaks, medfilt
 from vq2d.baselines import (
     create_similarity_network,
+    convert_annot_to_bbox,
     get_clip_name_from_clip_uid,
     perform_retrieval,
     SiamPredictor,
 )
+from vq2d.metrics import compute_visual_query_metrics
 from vq2d.structures import ResponseTrack
 from vq2d.tracking import Tracker
 
@@ -28,8 +30,10 @@ setup_logger()
 
 import hydra
 from omegaconf import DictConfig, OmegaConf
-import numpy as np
-import time
+
+
+SKIP_UIDS = []
+
 
 def get_images_at_peak(all_bboxes, all_scores, all_imgs, peak_idx, topk=5):
     bboxes = all_bboxes[peak_idx]
@@ -42,12 +46,17 @@ def get_images_at_peak(all_bboxes, all_scores, all_imgs, peak_idx, topk=5):
     return bbox_images
 
 
-def predict_vq_test(annotations, cfg, device_id, use_tqdm=False):
+def evaluate_vq(annotations, cfg, device_id, use_tqdm=False):
 
     data_cfg = cfg.data
     sig_cfg = cfg.signals
 
-    pred_response_tracks = []
+    visual_crop_boxes = []
+    gt_response_track = []
+    pred_response_track = []
+    n_accessed_frames_per_sample = []
+    n_total_frames_per_sample = []
+    dataset_uids = []
 
     device = torch.device(f"cuda:{device_id}")
 
@@ -72,15 +81,11 @@ def predict_vq_test(annotations, cfg, device_id, use_tqdm=False):
         OmegaConf.save(cfg, os.path.join(cfg.logging.save_dir, "config.yaml"))
 
     annotations_iter = tqdm.tqdm(annotations) if use_tqdm else annotations
-    asjad_idx = 0
-    # if asjad_idx == 0:
-    #     annotation = annotations_iter[0]
-    for annotation in annotations_iter:
-        print(" AT VIDEO    " + str(asjad_idx) + " out of " + str(len(annotations_iter)))
-        asjad_idx = asjad_idx + 1
+    for idx, annotation in enumerate(annotations_iter):
         start_time = time.time()
         clip_uid = annotation["clip_uid"]
-        annotation_uid = annotation["metadata"]["annotation_uid"]
+        if clip_uid in SKIP_UIDS:
+            continue
         # Load clip from file
         clip_path = os.path.join(
             data_cfg.data_root, get_clip_name_from_clip_uid(clip_uid)
@@ -88,16 +93,19 @@ def predict_vq_test(annotations, cfg, device_id, use_tqdm=False):
         video_reader = pims.Video(clip_path)
         query_frame = annotation["query_frame"]
         visual_crop = annotation["visual_crop"]
+        # object_title = annotation["object_title"]
         vcfno = annotation["visual_crop"]["frame_number"]
         clip_frames = video_reader[0 : max(query_frame, vcfno) + 1]
         clip_read_time = time.time() - start_time
         start_time = time.time()
+        
         # Retrieve nearest matches and their scores per image
         ret_bboxes, ret_scores, ret_imgs, visual_crop_im = perform_retrieval(
             clip_frames,
             visual_crop,
             query_frame,
-            predictor,
+            net=predictor,
+            # object_title = object_title,
             batch_size=data_cfg.rcnn_batch_size,
             recency_factor=cfg.model.recency_factor,
             subsampling_factor=cfg.model.subsampling_factor,
@@ -116,17 +124,15 @@ def predict_vq_test(annotations, cfg, device_id, use_tqdm=False):
         if kernel_size % 2 == 0:
             kernel_size += 1
         score_signal_sm = medfilt(score_signal, kernel_size=kernel_size)
-        score_signal_sm = (score_signal_sm-min(score_signal_sm))/(max(score_signal_sm)-min(score_signal_sm))
-    
         # Identify the latest peak in the signal
         peaks, _ = find_peaks(
-            score_signal_sm, height = 0.65,
+            score_signal_sm,
+            height=sig_cfg.height,
             distance=sig_cfg.distance,
             width=sig_cfg.width,
             prominence=sig_cfg.prominence,
         )
         peak_signal_time_taken = time.time() - start_time
-        #peaks = np.where(score_signal_sm>0.8)[0]
         start_time = time.time()
         # Perform tracking to predict response track
         search_frames = clip_frames[: query_frame - 1]
@@ -137,12 +143,31 @@ def predict_vq_test(annotations, cfg, device_id, use_tqdm=False):
                 init_state, init_frame, search_frames, similarity_net, device
             )
             pred_rts = [ResponseTrack(pred_rt, score=1.0)]
-            pred_response_tracks.append(pred_rts)
+            pred_response_track.append(pred_rts)
         else:
             pred_rt = [ret_bboxes[-1][0]]
             pred_rt_vis = []
             pred_rts = [ResponseTrack(pred_rt, score=1.0)]
-            pred_response_tracks.append(pred_rts)
+            pred_response_track.append(pred_rts)
+        # Get GT response window
+        gt_response_track.append(
+            ResponseTrack(
+                [convert_annot_to_bbox(rf) for rf in annotation["response_track"]]
+            )
+        )
+        visual_crop_boxes.append(convert_annot_to_bbox(visual_crop))
+        # Timeliness metrics
+        accessed_frames = set()
+        for bboxes in ret_bboxes:
+            accessed_frames.add(bboxes[0].fno)
+        for rt in pred_rts:
+            for bbox in rt.bboxes:
+                accessed_frames.add(bbox.fno)
+        n_accessed_frames = len(accessed_frames)
+        n_total_frames = query_frame
+        n_accessed_frames_per_sample.append(n_accessed_frames)
+        n_total_frames_per_sample.append(n_total_frames)
+        dataset_uids.append(annotation["dataset_uid"])
 
         tracking_time_taken = time.time() - start_time
         print(
@@ -151,7 +176,7 @@ def predict_vq_test(annotations, cfg, device_id, use_tqdm=False):
             "detection time: {:>6.2f} mins | "
             "peak signal time: {:>6.2f} mins | "
             "tracking time: {:>6.2f} mins".format(
-                annotation["clip_uid"],
+                annotation["dataset_uid"],
                 annotation["query_frame"],
                 clip_read_time / 60.0,
                 detection_time_taken / 60.0,
@@ -168,21 +193,27 @@ def predict_vq_test(annotations, cfg, device_id, use_tqdm=False):
             # plt.plot(score_signal, color="gray", label="Original signal")
             plt.plot(score_signal_sm, color="blue", label="Similarity scores")
             # Plot highest-scoring pred response track
-            pred_rt_start, pred_rt_end = pred_response_tracks[-1][0].temporal_extent
+            pred_rt_start, pred_rt_end = pred_response_track[-1][0].temporal_extent
             rt_signal = np.zeros((query_frame,))
             rt_signal[pred_rt_start : pred_rt_end + 1] = 1
             plt.plot(rt_signal, color="red", label="Pred response track")
             # Plot peak in signal
             plt.plot(peaks, score_signal_sm[peaks], "rx", label="Peaks")
+            # Plot gt response track
+            gt_rt_start, gt_rt_end = gt_response_track[-1].temporal_extent
+            rt_signal = np.zeros((query_frame,))
+            rt_signal[gt_rt_start : gt_rt_end + 1] = 1
+            plt.plot(rt_signal, color="green", label="GT Response track")
+            plt.legend()
             save_path = os.path.join(
-                cfg.logging.save_dir, f"example_{annotation_uid}_graph.png"
+                cfg.logging.save_dir, f"example_{idx:05d}_graph.png"
             )
             plt.savefig(save_path, dpi=500)
             plt.close()
             ###################### Visualize retrievals ########################
             # Visualize crop
             save_path = os.path.join(
-                cfg.logging.save_dir, f"example_{annotation_uid}_visual_crop.png"
+                cfg.logging.save_dir, f"example_{idx:05d}_visual_crop.png"
             )
             skimage.io.imsave(save_path, visual_crop_im)
             # Visualize retrievals at the peaks
@@ -193,130 +224,125 @@ def predict_vq_test(annotations, cfg, device_id, use_tqdm=False):
                 for image_idx, image in enumerate(peak_images):
                     save_path = os.path.join(
                         cfg.logging.save_dir,
-                        f"example_{annotation_uid}_peak_{peak_idx:05d}_rank_{image_idx:03d}.png",
+                        f"example_{idx:05d}_peak_{peak_idx:05d}_rank_{image_idx:03d}.png",
                     )
                     skimage.io.imsave(save_path, image)
             ################## Visualize response track ########################
-            save_path = os.path.join(cfg.logging.save_dir, f"example_{annotation_uid}_rt.mp4")
+            save_path = os.path.join(cfg.logging.save_dir, f"example_{idx:05d}_rt.mp4")
             writer = imageio.get_writer(save_path)
             for rtf in pred_rt_vis:
                 writer.append_data(rtf)
             writer.close()
             ################## Visualize search window #########################
-            save_path = os.path.join(cfg.logging.save_dir, f"example_{annotation_uid}_sw.mp4")
+            save_path = os.path.join(cfg.logging.save_dir, f"example_{idx:05d}_sw.mp4")
             writer = imageio.get_writer(save_path)
             for sf in search_frames:
                 writer.append_data(sf)
             writer.close()
 
-    return pred_response_tracks
+    return (
+        pred_response_track,
+        gt_response_track,
+        visual_crop_boxes,
+        dataset_uids,
+        n_accessed_frames_per_sample,
+        n_total_frames_per_sample,
+    )
 
 
 def _mp_aux_fn(inputs):
-    return predict_vq_test(*inputs)
-
-def convert_annotations_to_list(annotations):
-    annotations_list = []
-    for v in annotations["videos"]:
-        vuid = v["video_uid"]
-        for c in v["clips"]:
-            cuid = c["clip_uid"]
-            for a in c["annotations"]:
-                aid = a["annotation_uid"]
-                for qid, q in a["query_sets"].items():
-                    if not q['is_valid']:
-                        continue
-                    annotations_list.append(
-                        {
-                            "metadata": {
-                                "video_uid": vuid,
-                                "video_start_sec": c["video_start_sec"],
-                                "video_end_sec": c["video_end_sec"],
-                                "clip_fps": c["clip_fps"],
-                                "query_set": qid,
-                                "annotation_uid": aid,
-                            },
-                            "clip_uid": cuid,
-                            "query_frame": q["query_frame"],
-                            "visual_crop": q["visual_crop"],
-                        }
-                    )
-    return annotations_list
+    return evaluate_vq(*inputs)
 
 
-def format_predictions(annotations, annotations_list, predicted_rts):
-    # Get predictions for each annotation_uid
-    print("Formatting Predictions")
-    annotation_uid_to_prediction = {}
-    for pred_rt, annot in zip(predicted_rts, annotations_list):
-        auid = annot["metadata"]["annotation_uid"]
-        query_set = annot["metadata"]["query_set"]
-        if auid not in annotation_uid_to_prediction:
-            annotation_uid_to_prediction[auid] = {}
-        annotation_uid_to_prediction[auid][query_set] = [rt.to_json() for rt in pred_rt]
-    # Format predictions
+def evaluate_vq_parallel(annotations, cfg):
+    if cfg.data.debug_mode:
+        cfg.data.num_processes = 1
+
+    context = mp.get_context("forkserver")
+    pool = context.Pool(cfg.data.num_processes, maxtasksperchild=2)
+    # Split data across processes
+    B = cfg.data.batch_size
+    mp_annotations = [annotations[i : (i + B)] for i in range(0, len(annotations), B)]
+    N = len(mp_annotations)
+    devices = [i for i in range(torch.cuda.device_count())]
+    mp_cfgs = [cfg for _ in range(N)]
+    mp_devices = [devices[i % len(devices)] for i in range(N)]
+    mp_inputs = zip(mp_annotations, mp_cfgs, mp_devices)
+    # Perform task
+    list_of_outputs = list(tqdm.tqdm(pool.imap(_mp_aux_fn, mp_inputs), total=N))
+    # Evaluate predictions
+    pred_rt = []
+    gt_rt = []
+    vc_boxes = []
+    dataset_uids = []
+    acc_frames = []
+    tot_frames = []
+    for output in list_of_outputs:
+        pred_rt += output[0]
+        gt_rt += output[1]
+        vc_boxes += output[2]
+        dataset_uids += output[3]
+        acc_frames += output[4]
+        tot_frames += output[5]
+
+    metrics = compute_visual_query_metrics(
+        pred_rt, gt_rt, vc_boxes, acc_frames, tot_frames
+    )
     predictions = {
-        "version": "1.0.5",
-        "challenge": "ego4d_vq2d_challenge",
-        "results": {
-            "videos": []
-        }
+        "predicted_response_track": pred_rt,
+        "ground_truth_response_track": gt_rt,
+        "visual_crop": vc_boxes,
+        "dataset_uids": dataset_uids,
+        "accessed_frames": acc_frames,
+        "total_frames": tot_frames,
     }
-    for v in annotations["videos"]:
-        video_predictions = {"video_uid": v["video_uid"], "clips": []}
-        for c in v["clips"]:
-            clip_predictions = {"clip_uid": c["clip_uid"], "predictions": []}
-            for a in c["annotations"]:
-                auid = a["annotation_uid"]
-                
-
-                if auid in annotation_uid_to_prediction:
-                    for key in annotation_uid_to_prediction[auid].keys():
-                        annotation_uid_to_prediction[auid][key] = annotation_uid_to_prediction[auid][key][0]
-
-                    #print(annotation_uid_to_prediction[auid])
-                    apred = {
-                        "query_sets": annotation_uid_to_prediction[auid],
-                        'annotation_uid': auid, 
-                    }
-                else:
-                    apred = {
-                        "query_sets": {
-                            qid: {"bboxes": [], "score": 0.0}
-                            for qid in a["query_sets"].keys()
-                        }, 
-                        'annotation_uid': auid,
-                    }
-                clip_predictions["predictions"].append(apred)
-            video_predictions["clips"].append(clip_predictions)
-        predictions["results"]["videos"].append(video_predictions)
-    print("Predictions Formatted")
-    return predictions
+    return metrics, predictions
 
 
 @hydra.main(config_path="vq2d", config_name="config")
 def main(cfg: DictConfig) -> None:
     # Load annotations
-    for index in range(3000,4461):
-        annot_path = osp.join(cfg.data.annot_root, f"vq_test_unannotated.json")
-        with open(annot_path) as fp:
-            annotations = json.load(fp)
-        annotations_list = convert_annotations_to_list(annotations)
-        if cfg.data.debug_mode:
-            # print(cfg.data.debug_count_index)
-            # print(cfg.data.debug_count_index+cfg.data.debug_count)
-            # annotations_list = annotations_list[ cfg.data.debug_count_index  : cfg.data.debug_count_index+cfg.data.debug_count]
-            annotations_list = annotations_list[ index  : index+1]
-        elif cfg.data.subsample:
-            annotations_list = annotations_list[::3]
-        predicted_rts =  predict_vq_test(annotations_list, cfg,0)#predict_vq_test_parallel(annotations_list, cfg)
-        # Convert prediction to challenge format
-        predictions = format_predictions(annotations, annotations_list, predicted_rts)
-        # predictions = format_predictions(annotations, annotations_list, predicted_rts)
-        with open("/media/goku/4b66c306-b38b-4701-9bd5-fd5c65a905fd/asjad.s/EGO4D/vq2d_cvpr/results/outputs_"+str(index)+".json.gz", "w") as fp:
-            json.dump(predictions, fp)
-        
-        print("Completed Video "+ str(index))
+    annot_path = osp.join(cfg.data.annot_root, f"{cfg.data.split}_annot.json.gz")
+    with gzip.open(annot_path, "rt") as fp:
+        annotations = json.load(fp)
+
+    # evaluation for a part of video
+    if False:
+    	if cfg.data.n_part > 1:
+        	start = int(len(annotations) * cfg.data.part / cfg.data.n_part )
+        	end = int(len(annotations) * (cfg.data.part+1) / cfg.data.n_part )
+        	if end > len(annotations):
+            		end = len(annotations)
+        	annotations = annotations[start:end]
+    if cfg.data.debug_mode:
+        annotations = annotations[: cfg.data.debug_count]
+    elif cfg.data.subsample:
+        annotations = annotations[::3]
+
+    metrics, predictions = evaluate_vq_parallel(annotations, cfg)
+    print("==========> Retrieval performance")
+    for k, v in metrics.items():
+        print(f"{k:<40s} | {v:8.5f}")
+    # Store predictions and statistics
+    predictions = {
+        "predicted_response_track": [
+            [
+                [rt.to_json() for rt in rts]
+                for rts in predictions["predicted_response_track"]
+            ]
+        ],
+        "ground_truth_response_track": [
+            rt.to_json() for rt in predictions["ground_truth_response_track"]
+        ],
+        "visual_crop": [vc.to_json() for vc in predictions["visual_crop"]],
+        "dataset_uids": predictions["dataset_uids"],
+        "accessed_frames": predictions["accessed_frames"],
+        "total_frames": predictions["total_frames"],
+    }
+    outputs = {"predictions": predictions, "metrics": metrics}
+    with gzip.open(cfg.logging.stats_save_path, "wt") as fp:
+        json.dump(outputs, fp)
+
 
 if __name__ == "__main__":
     main()
